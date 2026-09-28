@@ -1,0 +1,147 @@
+/*
+ ==============================================================================
+ SMART ELECTRICAL POWER MONITORING SYSTEM
+ Responsive Media Queries & Mobile Optimizations
+ ==============================================================================
+*/
+
+/* Laptops & Medium Screens (<= 1280px) */
+@media (max-width: 1280px) {
+  .kpi-grid {
+    grid-template-columns: repeat(3, 1fr);
+  }
+
+  .analysis-row {
+    grid-template-columns: 1fr;
+  }
+
+  .secondary-analysis-row {
+    grid-template-columns: 1fr;
+  }
+
+  .alerts-and-table-row {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Tablets (<= 992px) */
+@media (max-width: 992px) {
+  .top-navbar {
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    padding: 0.75rem 1rem;
+  }
+
+  .brand-title-group h1 {
+    font-size: 1rem;
+  }
+
+  .brand-title-group p {
+    font-size: 0.7rem;
+  }
+
+  .header-status-group {
+    order: 3;
+    width: 100%;
+    justify-content: space-between;
+    padding-top: 0.5rem;
+    border-top: 1px solid var(--border-subtle);
+  }
+
+  .kpi-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .charts-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .full-width-chart {
+    grid-column: span 1;
+  }
+}
+
+/* Mobile Devices (<= 640px) */
+@media (max-width: 640px) {
+  .main-wrapper {
+    padding: 0.75rem;
+  }
+
+  .brand-logo-badge {
+    width: 36px;
+    height: 36px;
+  }
+
+  .brand-badge {
+    display: none;
+  }
+
+  .kpi-grid {
+    grid-template-columns: 1fr;
+    gap: 0.75rem;
+  }
+
+  .kpi-value {
+    font-size: 1.6rem;
+  }
+
+  .pf-metrics-strip {
+    grid-template-columns: 1fr;
+    gap: 0.5rem;
+  }
+
+  .real-power-showcase {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.75rem;
+  }
+
+  .showcase-left .power-hero-val {
+    font-size: 2.25rem;
+  }
+
+  .params-subgrid {
+    grid-template-columns: 1fr;
+    gap: 0.5rem;
+  }
+
+  .comparison-stats-row {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 0.5rem;
+  }
+
+  .section-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.5rem;
+  }
+
+  .time-range-controls {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .chart-container-large {
+    height: 180px;
+  }
+
+  .modal-window {
+    margin: 0.5rem;
+  }
+
+  .modal-footer {
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+
+  .modal-footer .btn-primary,
+  .modal-footer .btn-secondary {
+    width: 100%;
+  }
+
+  .footer-bar {
+    flex-direction: column;
+    gap: 0.5rem;
+    text-align: center;
+  }
+}

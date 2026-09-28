@@ -1,0 +1,11 @@
+{
+  "name": "smart-electrical-power-monitoring",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Smart Electrical Power Monitoring System - Real-Time SCADA IoT Dashboard",
+  "scripts": {
+    "dev": "node serve.js",
+    "start": "node serve.js",
+    "serve": "node serve.js"
+  }
+}
