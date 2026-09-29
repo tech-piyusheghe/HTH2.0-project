@@ -1,22 +1,39 @@
 /**
  * ==============================================================================
  * SMART ELECTRICAL POWER MONITORING SYSTEM
- * Main Dashboard Controller & UI Binding
+ * Main Dashboard Controller & Real-Time Telemetry Pipeline
  * ==============================================================================
  */
 
 (function () {
-  // State variables
+  // Master consolidated state: retains all fields so partial updates never blank out other cards
+  const currentTelemetry = {
+    voltage: null,
+    current: null,
+    realPower: null,
+    apparentPower: null,
+    powerFactor: null,
+    normalPF: 0.133,
+    pfLowLimit: 0.000,
+    pfHighLimit: 0.283,
+    timestamp: Date.now(),
+    relayStatus: "ON",
+    machineStatus: "NORMAL",
+    connection: "ONLINE",
+    deviceName: "ESP32 PF Protection",
+    wifiRSSI: -58
+  };
+
   let previousRealPower = null;
-  let lastDataReceivedTime = null;
   let esp32WatchdogTimer = null;
-  const ESP32_TIMEOUT_MS = 12000; // 12 seconds with no data -> mark offline
+  const ESP32_TIMEOUT_MS = 15000; // 15 seconds without data marks ESP32 offline
   const recentReadingsList = [];
   const MAX_TABLE_ROWS = 25;
+  let lastTableRowTimestamp = 0;
 
   /**
    * Safe Number Formatter
-   * Never returns NaN, undefined, or null. Returns fallback (default: '--')
+   * Never returns NaN or undefined. Returns fallback (default: '--')
    */
   function formatVal(val, decimals = 2, fallback = "--") {
     if (val === null || val === undefined || val === "") return fallback;
@@ -32,7 +49,7 @@
   }
 
   /**
-   * Update all Main KPI Cards
+   * Update all 6 Main KPI Cards in unison
    */
   function updateKpiCards(data) {
     if (!data) return;
@@ -66,12 +83,12 @@
    * Update Power Factor Analysis Section & Radial Gauge
    */
   function updatePowerFactorSection(data) {
-    if (!data) return;
+    if (!data) return "WAITING";
 
-    const pf = data.powerFactor !== undefined && data.powerFactor !== null ? Number(data.powerFactor) : null;
-    const normalPf = data.normalPF !== undefined && data.normalPF !== null ? Number(data.normalPF) : 0.035;
-    const pfLow = data.pfLowLimit !== undefined && data.pfLowLimit !== null ? Number(data.pfLowLimit) : 0.000;
-    const pfHigh = data.pfHighLimit !== undefined && data.pfHighLimit !== null ? Number(data.pfHighLimit) : 0.185;
+    const pf = data.powerFactor !== null && !isNaN(Number(data.powerFactor)) ? Number(data.powerFactor) : null;
+    const normalPf = data.normalPF !== null && !isNaN(Number(data.normalPF)) ? Number(data.normalPF) : 0.133;
+    const pfLow = data.pfLowLimit !== null && !isNaN(Number(data.pfLowLimit)) ? Number(data.pfLowLimit) : 0.000;
+    const pfHigh = data.pfHighLimit !== null && !isNaN(Number(data.pfHighLimit)) ? Number(data.pfHighLimit) : 0.283;
 
     // Display values
     const pfValEl = document.getElementById("pf-current-val");
@@ -111,16 +128,16 @@
       pfStatusBadge.innerHTML = `<span class="badge-dot"></span> ${statusText}`;
     }
 
-    // Update Visual Gauge Needle / Arc
+    // Update Visual Gauge Needle & Arc
     updatePfGauge(pf, pfLow, pfHigh);
 
     return status;
   }
 
   /**
-   * Update the SVG / Canvas Power Factor Semi-circle Gauge
+   * Update the SVG Power Factor Semi-circle Gauge
    */
-  function updatePfGauge(pf, lowLimit = 0.0, highLimit = 0.2) {
+  function updatePfGauge(pf, lowLimit = 0.0, highLimit = 0.283) {
     const needle = document.getElementById("pf-gauge-needle");
     const progressArc = document.getElementById("pf-gauge-progress");
     const gaugeValueLabel = document.getElementById("pf-gauge-label");
@@ -134,8 +151,8 @@
       return;
     }
 
-    // Gauge range: 0.000 to max (say 0.250 or highLimit * 1.35)
-    const maxScale = Math.max(0.25, highLimit * 1.35);
+    // Gauge range: 0.000 to max (say 0.350 or highLimit * 1.25)
+    const maxScale = Math.max(0.35, (highLimit || 0.283) * 1.25);
     const clampedPf = Math.max(0, Math.min(maxScale, pf));
     const ratio = clampedPf / maxScale; // 0 to 1
 
@@ -171,7 +188,7 @@
   function updateRealPowerAnalysis(data) {
     if (!data) return;
 
-    const currentP = data.realPower !== undefined && data.realPower !== null ? Number(data.realPower) : null;
+    const currentP = data.realPower !== null && !isNaN(Number(data.realPower)) ? Number(data.realPower) : null;
     const pEl = document.getElementById("analysis-real-power");
     const vEl = document.getElementById("analysis-voltage");
     const iEl = document.getElementById("analysis-current");
@@ -228,12 +245,12 @@
     if (reactiveEl) reactiveEl.textContent = `${formatVal(varValue, 2)} VAR`;
 
     // Efficiency: Real / Apparent * 100%
-    const eff = ap > 0 ? (rp / ap) * 100 : 0;
+    const eff = ap > 0 ? Math.min(100, (rp / ap) * 100) : 0;
     if (efficiencyEl) efficiencyEl.textContent = `${formatVal(eff, 1)}%`;
   }
 
   /**
-   * Update Recent Readings Table
+   * Update Recent Readings Table with timestamp throttling
    */
   function addRecentReadingRow(data, pfStatus) {
     if (!data) return;
@@ -241,7 +258,14 @@
     const tbody = document.getElementById("recent-readings-tbody");
     if (!tbody) return;
 
-    const timeStr = formatTime(data.timestamp || Date.now());
+    const rowTime = data.timestamp || Date.now();
+    // Throttle duplicate rows within 800ms
+    if (Math.abs(rowTime - lastTableRowTimestamp) < 800) {
+      return;
+    }
+    lastTableRowTimestamp = rowTime;
+
+    const timeStr = formatTime(rowTime);
     const vStr = formatVal(data.voltage, 2);
     const iStr = formatVal(data.current, 3);
     const rpStr = formatVal(data.realPower, 2);
@@ -251,7 +275,7 @@
     let badgeClass = "badge-success";
     if (pfStatus === "LOW" || pfStatus === "HIGH") {
       badgeClass = "badge-warning";
-    } else if (pfStatus === "--") {
+    } else if (pfStatus === "--" || pfStatus === "WAITING") {
       badgeClass = "badge-neutral";
     }
 
@@ -295,8 +319,6 @@
    */
   function resetWatchdogTimer() {
     clearTimeout(esp32WatchdogTimer);
-
-    // Set ESP32 online
     setEsp32Status(true);
 
     esp32WatchdogTimer = setTimeout(() => {
@@ -304,7 +326,7 @@
       if (window.AlertManager) {
         window.AlertManager.add({
           title: "DEVICE OFFLINE",
-          message: "No heartbeat or telemetry received from ESP32 for over 12 seconds.",
+          message: "No heartbeat or telemetry received from ESP32 for over 15 seconds.",
           severity: "warning",
           source: "system"
         });
@@ -355,9 +377,7 @@
   }
 
   function setLastUpdated(timestamp = Date.now()) {
-    lastDataReceivedTime = timestamp;
     const timeStr = formatTime(timestamp);
-
     const hdrEl = document.getElementById("last-updated-text");
     const sysEl = document.getElementById("sys-last-data");
 
@@ -366,106 +386,163 @@
   }
 
   /**
-   * Normalize incoming telemetry to support standard schema and variations
+   * Consolidated Telemetry Normalizer:
+   * Merges incoming packet into currentTelemetry master state so all parameters stay in sync
    */
   function normalizeData(raw) {
-    if (!raw || typeof raw !== "object") return null;
-    const item = raw.realtime || raw.IndustrialMachine || raw;
-    const v = item.voltage !== undefined && item.voltage !== null ? Number(item.voltage) : (item.v !== undefined ? Number(item.v) : null);
-    const i = item.current !== undefined && item.current !== null ? Number(item.current) : (item.i !== undefined ? Number(item.i) : null);
-    const p = item.realPower !== undefined && item.realPower !== null ? Number(item.realPower) : (item.power !== undefined && item.power !== null ? Number(item.power) : (item.p !== undefined ? Number(item.p) : null));
-    let s = item.apparentPower !== undefined && item.apparentPower !== null ? Number(item.apparentPower) : (item.s !== undefined ? Number(item.s) : null);
-    if (s === null && v !== null && i !== null) {
-      s = v * i;
-    }
-    let pf = item.powerFactor !== undefined && item.powerFactor !== null ? Number(item.powerFactor) : (item.pf !== undefined ? Number(item.pf) : null);
-    if (pf === null && p !== null && s !== null && s > 0) {
-      pf = p / s;
-    }
-    const npf = item.normalPF !== undefined && item.normalPF !== null ? Number(item.normalPF) : 0.035;
-    const pfLow = item.pfLowLimit !== undefined && item.pfLowLimit !== null ? Number(item.pfLowLimit) : 0.000;
-    const pfHigh = item.pfHighLimit !== undefined && item.pfHighLimit !== null ? Number(item.pfHighLimit) : 0.185;
-    const ts = item.timestamp || item.lastUpdated || Date.now();
+    if (!raw || typeof raw !== "object") return currentTelemetry;
 
-    return {
-      voltage: isNaN(v) ? null : v,
-      current: isNaN(i) ? null : i,
-      realPower: isNaN(p) ? null : p,
-      apparentPower: isNaN(s) ? null : s,
-      powerFactor: isNaN(pf) ? null : pf,
-      normalPF: isNaN(npf) ? 0.035 : npf,
-      pfLowLimit: isNaN(pfLow) ? 0.000 : pfLow,
-      pfHighLimit: isNaN(pfHigh) ? 0.185 : pfHigh,
-      timestamp: ts,
-      connection: item.connection,
-      machineStatus: item.machineStatus
-    };
+    const item = raw.realtime || raw.IndustrialMachine || raw;
+
+    // Voltage
+    if (item.voltage !== undefined && item.voltage !== null && !isNaN(Number(item.voltage))) {
+      currentTelemetry.voltage = Number(item.voltage);
+    } else if (item.v !== undefined && item.v !== null && !isNaN(Number(item.v))) {
+      currentTelemetry.voltage = Number(item.v);
+    }
+
+    // Current
+    if (item.current !== undefined && item.current !== null && !isNaN(Number(item.current))) {
+      currentTelemetry.current = Number(item.current);
+    } else if (item.i !== undefined && item.i !== null && !isNaN(Number(item.i))) {
+      currentTelemetry.current = Number(item.i);
+    }
+
+    // Real Power (ESP32 writes 'power', standard schema uses 'realPower')
+    if (item.realPower !== undefined && item.realPower !== null && !isNaN(Number(item.realPower))) {
+      currentTelemetry.realPower = Number(item.realPower);
+    } else if (item.power !== undefined && item.power !== null && !isNaN(Number(item.power))) {
+      currentTelemetry.realPower = Number(item.power);
+    } else if (item.p !== undefined && item.p !== null && !isNaN(Number(item.p))) {
+      currentTelemetry.realPower = Number(item.p);
+    }
+
+    // Apparent Power (auto-derive V*I if missing)
+    if (item.apparentPower !== undefined && item.apparentPower !== null && !isNaN(Number(item.apparentPower))) {
+      currentTelemetry.apparentPower = Number(item.apparentPower);
+    } else if (item.s !== undefined && item.s !== null && !isNaN(Number(item.s))) {
+      currentTelemetry.apparentPower = Number(item.s);
+    } else if (currentTelemetry.voltage !== null && currentTelemetry.current !== null) {
+      currentTelemetry.apparentPower = currentTelemetry.voltage * currentTelemetry.current;
+    }
+
+    // Power Factor (auto-derive P/S if missing)
+    if (item.powerFactor !== undefined && item.powerFactor !== null && !isNaN(Number(item.powerFactor))) {
+      currentTelemetry.powerFactor = Number(item.powerFactor);
+    } else if (item.pf !== undefined && item.pf !== null && !isNaN(Number(item.pf))) {
+      currentTelemetry.powerFactor = Number(item.pf);
+    } else if (currentTelemetry.realPower !== null && currentTelemetry.apparentPower && currentTelemetry.apparentPower > 0) {
+      currentTelemetry.powerFactor = Math.min(1.0, currentTelemetry.realPower / currentTelemetry.apparentPower);
+    }
+
+    // Normal PF and Threshold Limits
+    if (item.normalPF !== undefined && item.normalPF !== null && !isNaN(Number(item.normalPF))) {
+      currentTelemetry.normalPF = Number(item.normalPF);
+    }
+    if (item.pfLowLimit !== undefined && item.pfLowLimit !== null && !isNaN(Number(item.pfLowLimit))) {
+      currentTelemetry.pfLowLimit = Number(item.pfLowLimit);
+    }
+    if (item.pfHighLimit !== undefined && item.pfHighLimit !== null && !isNaN(Number(item.pfHighLimit))) {
+      currentTelemetry.pfHighLimit = Number(item.pfHighLimit);
+    }
+
+    // Relay Status
+    if (item.relayStatus !== undefined && item.relayStatus !== null) {
+      currentTelemetry.relayStatus = String(item.relayStatus).toUpperCase();
+    }
+
+    // Machine Operation Status
+    if (item.machineStatus !== undefined && item.machineStatus !== null) {
+      currentTelemetry.machineStatus = String(item.machineStatus).toUpperCase();
+    }
+
+    // Connection Status
+    if (item.connection !== undefined && item.connection !== null) {
+      currentTelemetry.connection = String(item.connection).toUpperCase();
+    }
+
+    // Device Metadata
+    if (item.deviceName) {
+      currentTelemetry.deviceName = item.deviceName;
+    }
+    if (item.wifiRSSI !== undefined && item.wifiRSSI !== null) {
+      currentTelemetry.wifiRSSI = item.wifiRSSI;
+    }
+
+    // Timestamp: Always keep fresh local epoch
+    let ts = item.timestamp || item.lastUpdated;
+    if (typeof ts === "string") {
+      const parsed = Date.parse(ts);
+      ts = isNaN(parsed) ? Date.now() : parsed;
+    } else if (typeof ts !== "number" || ts < 1700000000000) {
+      // Handles ESP32 millis() like 93470
+      ts = Date.now();
+    }
+    currentTelemetry.timestamp = ts;
+
+    return { ...currentTelemetry };
   }
 
   /**
    * Main Real-time telemetry ingress handler
-   * Called directly by Firebase Realtime Database listener
+   * Called by Firebase WebSocket listener and direct REST fetch
    */
   function handleRealtimeData(raw) {
-    if (!raw) {
-      console.warn("[Dashboard] Received empty data packet from Firebase.");
-      return;
-    }
+    if (!raw) return;
 
     const data = normalizeData(raw);
-    if (!data) return;
 
     // 1. Reset Watchdog & Record Last Received
     resetWatchdogTimer();
-    setLastUpdated(data.timestamp || Date.now());
+    setLastUpdated(data.timestamp);
 
-    // 2. Update KPI Cards
+    // 2. Mark Firebase & ESP32 as active
+    setFirebaseStatus(true, "Firebase Connected");
+    if (data.connection === "ONLINE") {
+      setEsp32Status(true);
+    }
+
+    // 3. Update All 6 KPI Cards simultaneously
     updateKpiCards(data);
 
-    // 3. Update Power Factor Section & Gauge
+    // 4. Update Power Factor Section & Gauge
     const pfStatus = updatePowerFactorSection(data);
 
-    // 4. Update Real Power Section & Trend
+    // 5. Update Real Power Section & Trend
     updateRealPowerAnalysis(data);
 
-    // 5. Update Apparent vs Real Power Section
+    // 6. Update Apparent vs Real Power Section
     updateApparentVsReal(data);
 
-    // 6. Update Recent Readings Table
+    // 7. Update Recent Readings Table
     addRecentReadingRow(data, pfStatus);
 
-    // 7. Push to Live Charts
+    // 8. Push to Live Streaming Charts
     if (window.ChartManager) {
       window.ChartManager.addPoint(data);
     }
 
-    // 8. Evaluate parameter limits for Alerts
-    if (window.AlertManager) {
-      window.AlertManager.evaluate(data);
-
-      if (raw.machineStatus === "FAULT" || data.machineStatus === "FAULT") {
-        window.AlertManager.add({
-          title: "PF ABNORMAL - MACHINE FAULT",
-          message: `Abnormal power factor detected by ESP32 protection system. Relay is ${raw.relayStatus || "OFF"}.`,
-          severity: "critical",
-          source: "telemetry"
-        });
-      }
-    }
-
-    // 9. Update Connection & Device state if present in packet
-    if (raw.connection === "ONLINE" || data.connection === "ONLINE") {
-      setEsp32Status(true);
-    }
+    // 9. Update Hardware & System Status Grid
     const devEl = document.getElementById("sys-device-name");
     if (devEl) {
-      devEl.textContent = "ESP32 PF Protection";
+      devEl.textContent = data.deviceName || "ESP32 Industrial Power Monitor";
+    }
+
+    const wifiEl = document.getElementById("sys-wifi-status");
+    if (wifiEl) {
+      const rssi = data.wifiRSSI;
+      if (rssi !== undefined && rssi !== null) {
+        wifiEl.innerHTML = `<span class="badge-dot"></span> CONNECTED (${rssi} dBm)`;
+        wifiEl.className = "status-badge badge-success";
+      } else {
+        wifiEl.innerHTML = `<span class="badge-dot"></span> CONNECTED`;
+        wifiEl.className = "status-badge badge-success";
+      }
     }
 
     const machineStatusEl = document.getElementById("sys-machine-status");
     if (machineStatusEl) {
-      const ms = raw.machineStatus || data.machineStatus || "NORMAL";
-      if (ms === "FAULT") {
+      if (data.machineStatus === "FAULT") {
         machineStatusEl.className = "status-badge badge-critical";
         machineStatusEl.innerHTML = `<span class="badge-dot"></span> FAULT`;
       } else {
@@ -476,13 +553,26 @@
 
     const relayStatusEl = document.getElementById("sys-relay-status");
     if (relayStatusEl) {
-      const rs = raw.relayStatus || data.relayStatus || "ON";
-      if (rs === "ON") {
-        relayStatusEl.className = "status-badge badge-success";
-        relayStatusEl.innerHTML = `<span class="badge-dot"></span> ACTIVE (ON)`;
-      } else {
+      if (data.relayStatus === "OFF" || data.relayStatus === "TRIPPED") {
         relayStatusEl.className = "status-badge badge-critical";
         relayStatusEl.innerHTML = `<span class="badge-dot"></span> TRIPPED (OFF)`;
+      } else {
+        relayStatusEl.className = "status-badge badge-success";
+        relayStatusEl.innerHTML = `<span class="badge-dot"></span> ACTIVE (ON)`;
+      }
+    }
+
+    // 10. Evaluate parameter limits for Alerts
+    if (window.AlertManager) {
+      window.AlertManager.evaluate(data);
+
+      if (data.machineStatus === "FAULT") {
+        window.AlertManager.add({
+          title: "PF ABNORMAL - MACHINE FAULT",
+          message: `Abnormal power factor detected by ESP32 protection system. Relay is ${data.relayStatus || "OFF"}.`,
+          severity: "critical",
+          source: "telemetry"
+        });
       }
     }
   }
@@ -537,18 +627,11 @@
     handleSystemData,
     handleAlertsData,
     setFirebaseStatus,
-    setEsp32Status
+    setEsp32Status,
+    getCurrentData: () => ({ ...currentTelemetry })
   };
 
   window.onFirebaseStatusChange = function (isConnected, msg) {
     setFirebaseStatus(isConnected, msg);
-    if (!isConnected && window.AlertManager) {
-      window.AlertManager.add({
-        title: "FIREBASE DISCONNECTED",
-        message: msg || "Lost connection to Firebase Realtime Database.",
-        severity: "critical",
-        source: "system"
-      });
-    }
   };
 })();

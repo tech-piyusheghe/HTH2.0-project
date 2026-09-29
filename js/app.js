@@ -1,7 +1,7 @@
 /**
  * ==============================================================================
  * SMART ELECTRICAL POWER MONITORING SYSTEM
- * Application Bootstrap & Event Orchestration
+ * Application Bootstrap & Real-Time Orchestration
  * ==============================================================================
  */
 
@@ -29,9 +29,12 @@ document.addEventListener("DOMContentLoaded", () => {
 });
 
 /**
- * Configure Firebase listeners and handle data flow
+ * Configure Firebase listeners and handle dual-mode data flow
+ * Layer 1: Instant REST fetch on millisecond 0
+ * Layer 2: Persistent Firebase WebSocket streaming listeners
+ * Layer 3: Heartbeat polling fallback every 2000ms
  */
-function setupFirebaseConnection() {
+async function setupFirebaseConnection() {
   const isConfigured = window.FirebaseClient.isConfigured();
 
   if (!isConfigured) {
@@ -41,58 +44,47 @@ function setupFirebaseConnection() {
       window.Dashboard.setFirebaseStatus(false, "API Not Configured");
       window.Dashboard.setEsp32Status(false);
     }
-    if (window.AlertManager) {
-      window.AlertManager.add({
-        title: "FIREBASE NOT CONFIGURED",
-        message: "Add your Firebase API Key and Database URL in js/firebase.js or click Settings.",
-        severity: "info",
-        source: "system"
-      });
-    }
     return;
   }
 
   showConfigNotice(false);
 
-  // Initialize client
+  // STEP 1: Instant REST Fetch (Renders live data within 100ms, no waiting for WebSockets)
+  await fetchInstantTelemetry();
+
+  // STEP 2: Initialize Firebase Compat WebSocket client
   const initialized = window.FirebaseClient.init();
   if (!initialized) {
-    console.error("[App] Failed to initialize Firebase.");
-    return;
+    console.warn("[App] Firebase WebSockets could not initialize, continuing in REST mode.");
   }
 
-  // 1. Primary ESP32 Path: IndustrialMachine
+  // Primary Path: IndustrialMachine (ESP32 target)
   window.FirebaseClient.subscribe(
     "IndustrialMachine",
     (data) => {
-      console.log("Realtime Firebase data (IndustrialMachine):", data);
       if (data && window.Dashboard) {
+        console.log("[Firebase Realtime] Received IndustrialMachine packet:", data);
         window.Dashboard.handleRealtimeData(data);
-        if (data.connection === "ONLINE") {
-          window.Dashboard.setEsp32Status(true);
-        }
+        syncToPowerMonitoring(data);
       }
     },
     (err) => {
-      console.error("[Firebase] Error on IndustrialMachine:", err);
+      console.warn("[Firebase] WebSocket warning on IndustrialMachine:", err);
     }
   );
 
-  // 2. Secondary/Alternate Path: powerMonitoring/realtime
+  // Secondary/Alternate Path: powerMonitoring/realtime
   window.FirebaseClient.subscribe(
     "powerMonitoring/realtime",
     (data) => {
-      console.log("Realtime Firebase data (powerMonitoring/realtime):", data);
       if (data && window.Dashboard) {
+        console.log("[Firebase Realtime] Received powerMonitoring/realtime packet:", data);
         window.Dashboard.handleRealtimeData(data);
       }
-    },
-    (err) => {
-      console.warn("[Firebase] Path powerMonitoring/realtime not populated yet:", err);
     }
   );
 
-  // 3. Subscribe to System Health: powerMonitoring/system
+  // Subscribe to System Health: powerMonitoring/system
   window.FirebaseClient.subscribe(
     "powerMonitoring/system",
     (data) => {
@@ -102,7 +94,7 @@ function setupFirebaseConnection() {
     }
   );
 
-  // 4. Subscribe to Alerts: powerMonitoring/alerts
+  // Subscribe to Alerts: powerMonitoring/alerts
   window.FirebaseClient.subscribe(
     "powerMonitoring/alerts",
     (data) => {
@@ -112,48 +104,64 @@ function setupFirebaseConnection() {
     }
   );
 
-  // 5. Also listen to root to catch any other telemetry structures
-  window.FirebaseClient.subscribe(
-    "/",
-    (rootData) => {
-      if (!rootData) return;
-      if (rootData.IndustrialMachine && window.Dashboard) {
-        window.Dashboard.handleRealtimeData(rootData.IndustrialMachine);
-        if (rootData.IndustrialMachine.connection === "ONLINE") {
-          window.Dashboard.setEsp32Status(true);
-        }
-      }
-    }
-  );
+  // STEP 3: Continuous 2-second background heartbeat
+  // Ensures all cards stay 100% synchronized even if WebSockets reconnect or idle
+  if (!window._telemetryHeartbeat) {
+    window._telemetryHeartbeat = setInterval(async () => {
+      await fetchInstantTelemetry();
+    }, 2000);
+  }
 }
 
 /**
- * Inspect alternative Firebase paths if powerMonitoring/realtime returned empty snapshot
+ * Instant REST fetch from Firebase RTDB to load live data immediately
  */
-function checkAlternativeFirebaseStructure() {
-  window.FirebaseClient.subscribe(
-    "/",
-    (rootData) => {
-      if (!rootData) return;
-      console.log("[Firebase] Root database snapshot:", rootData);
+async function fetchInstantTelemetry() {
+  try {
+    // 1. Try reading IndustrialMachine
+    const indData = await window.FirebaseClient.fetchNode("IndustrialMachine");
+    if (indData && (indData.voltage !== undefined || indData.power !== undefined || indData.current !== undefined)) {
+      if (window.Dashboard) {
+        window.Dashboard.handleRealtimeData(indData);
+      }
+      syncToPowerMonitoring(indData);
+      return;
+    }
 
-      // If root contains IndustrialMachine
-      if (rootData.IndustrialMachine) {
-        console.log("Realtime Firebase data (adapted from IndustrialMachine):", rootData.IndustrialMachine);
-        if (window.Dashboard) {
-          window.Dashboard.handleRealtimeData(rootData.IndustrialMachine);
-          if (rootData.IndustrialMachine.connection) {
-            window.Dashboard.setEsp32Status(rootData.IndustrialMachine.connection === "ONLINE");
-          }
-        }
-      } else if (rootData.voltage !== undefined || rootData.current !== undefined) {
-        console.log("Realtime Firebase data (adapted from root):", rootData);
-        if (window.Dashboard) {
-          window.Dashboard.handleRealtimeData(rootData);
-        }
+    // 2. Try reading powerMonitoring/realtime
+    const pmData = await window.FirebaseClient.fetchNode("powerMonitoring/realtime");
+    if (pmData && (pmData.voltage !== undefined || pmData.realPower !== undefined)) {
+      if (window.Dashboard) {
+        window.Dashboard.handleRealtimeData(pmData);
       }
     }
-  );
+  } catch (err) {
+    console.warn("[Firebase] Heartbeat fetch:", err.message);
+  }
+}
+
+/**
+ * Mirror IndustrialMachine to powerMonitoring/realtime for unified multi-node support
+ */
+function syncToPowerMonitoring(data) {
+  if (!data || !window.FirebaseClient) return;
+
+  const standardPayload = {
+    voltage: data.voltage ?? null,
+    current: data.current ?? null,
+    realPower: data.realPower ?? data.power ?? null,
+    apparentPower: data.apparentPower ?? null,
+    powerFactor: data.powerFactor ?? null,
+    normalPF: data.normalPF ?? 0.133,
+    pfLowLimit: data.pfLowLimit ?? 0.000,
+    pfHighLimit: data.pfHighLimit ?? 0.283,
+    relayStatus: data.relayStatus ?? "ON",
+    machineStatus: data.machineStatus ?? "NORMAL",
+    timestamp: Date.now()
+  };
+
+  // Silently mirror via REST put
+  window.FirebaseClient.putNode("powerMonitoring/realtime", standardPayload);
 }
 
 /**
@@ -246,7 +254,7 @@ function setupSettingsModal() {
       if (window.AlertManager) {
         window.AlertManager.add({
           title: "SETTINGS SAVED",
-          message: "Firebase configuration updated and listener reconnected.",
+          message: "Firebase configuration updated and listeners reconnected.",
           severity: "success",
           source: "system"
         });
@@ -262,26 +270,25 @@ function setupSettingsModal() {
         testBtn.textContent = "Writing Test Data...";
 
         const sample = {
-          voltage: 11.88,
-          current: 4.203,
-          realPower: 1.30,
-          apparentPower: 49.92,
-          powerFactor: 0.026,
-          normalPF: 0.035,
+          voltage: 227.22,
+          current: 0.351,
+          realPower: 9.43,
+          apparentPower: 79.80,
+          powerFactor: 0.118,
+          normalPF: 0.133,
           pfLowLimit: 0.000,
-          pfHighLimit: 0.185
+          pfHighLimit: 0.283
         };
 
         if (window.FirebaseClient.isConfigured()) {
           await window.FirebaseClient.pushTestReading(sample);
           alert("Successfully published sample ESP32 telemetry packet to Firebase Realtime Database!");
         } else {
-          // If not configured, directly pipe to UI to demonstrate layout
           window.Dashboard.handleRealtimeData({
             ...sample,
             timestamp: Date.now()
           });
-          alert("Firebase is not connected yet, but the test reading was routed to the dashboard to test UI widgets!");
+          alert("Firebase credentials not configured, but telemetry rendered to dashboard widgets for UI verification!");
         }
       } catch (err) {
         alert("Error sending test reading: " + err.message);

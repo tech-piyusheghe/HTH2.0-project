@@ -3,16 +3,6 @@
  * SMART ELECTRICAL POWER MONITORING SYSTEM
  * Firebase Configuration & Realtime Database Client
  * ==============================================================================
- * 
- * Replace the placeholder credentials below with your actual Firebase project
- * credentials from the Firebase Console (Project Settings > General > Your apps).
- *
- * Firebase Realtime Database Path expected:
- *   - powerMonitoring/realtime/
- *   - powerMonitoring/history/
- *   - powerMonitoring/system/
- *   - powerMonitoring/alerts/
- * ==============================================================================
  */
 
 // Your web app's Firebase configuration
@@ -26,7 +16,7 @@ const defaultFirebaseConfig = {
   appId: "1:909095479582:web:a108fd0c7474d2a5b2410f"
 };
 
-// Check if credentials exist in localStorage (configured via Settings modal), else use default
+// Check if credentials exist in localStorage, else use default
 function getActiveFirebaseConfig() {
   const storedConfig = localStorage.getItem("hth_firebase_config");
   if (storedConfig) {
@@ -67,6 +57,45 @@ function isConfigured(config = firebaseConfig) {
 }
 
 /**
+ * Direct REST fetch helper for instant, zero-delay data reading
+ */
+async function fetchNode(path = "IndustrialMachine") {
+  try {
+    const config = getActiveFirebaseConfig();
+    const baseUrl = config.databaseURL.replace(/\/+$/, "");
+    const cleanPath = path.startsWith("/") ? path : "/" + path;
+    const url = `${baseUrl}${cleanPath}.json`;
+    const res = await fetch(url, { cache: "no-store" });
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+    return await res.json();
+  } catch (err) {
+    console.warn(`[Firebase REST] Failed to fetch node '${path}':`, err);
+    return null;
+  }
+}
+
+/**
+ * Direct REST write helper to update a node
+ */
+async function putNode(path, data) {
+  try {
+    const config = getActiveFirebaseConfig();
+    const baseUrl = config.databaseURL.replace(/\/+$/, "");
+    const cleanPath = path.startsWith("/") ? path : "/" + path;
+    const url = `${baseUrl}${cleanPath}.json`;
+    const res = await fetch(url, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data)
+    });
+    return res.ok;
+  } catch (err) {
+    console.warn(`[Firebase REST] Failed to put node '${path}':`, err);
+    return false;
+  }
+}
+
+/**
  * Initialize Firebase Application & Database Service
  */
 function initFirebase(customConfig = null) {
@@ -76,7 +105,7 @@ function initFirebase(customConfig = null) {
   detachAllListeners();
 
   if (!isConfigured(configToUse)) {
-    console.warn("[Firebase] Credentials not configured yet. Awaiting valid configuration.");
+    console.warn("[Firebase] Credentials not configured yet.");
     isFirebaseInitialized = false;
     isFirebaseConnected = false;
     if (window.onFirebaseStatusChange) {
@@ -87,32 +116,31 @@ function initFirebase(customConfig = null) {
 
   try {
     // If an app already exists, delete/re-initialize
-    if (firebase.apps && firebase.apps.length > 0) {
-      firebaseApp = firebase.app();
-    } else {
-      firebaseApp = firebase.initializeApp(configToUse);
+    if (window.firebase && window.firebase.apps && window.firebase.apps.length > 0) {
+      firebaseApp = window.firebase.app();
+    } else if (window.firebase) {
+      firebaseApp = window.firebase.initializeApp(configToUse);
     }
 
-    firebaseDb = firebase.database();
-    isFirebaseInitialized = true;
-    console.log("[Firebase] Initialized successfully with database URL:", configToUse.databaseURL);
+    if (window.firebase) {
+      firebaseDb = window.firebase.database();
+      isFirebaseInitialized = true;
+      console.log("[Firebase] Initialized with database URL:", configToUse.databaseURL);
 
-    // Monitor Firebase connection state (.info/connected)
-    const connectedRef = firebaseDb.ref(".info/connected");
-    connectedRef.on("value", (snap) => {
-      isFirebaseConnected = snap.val() === true;
-      if (isFirebaseConnected) {
-        console.log("Firebase connected");
-      }
-      console.log("[Firebase] Connection status:", isFirebaseConnected ? "CONNECTED" : "DISCONNECTED");
-      if (window.onFirebaseStatusChange) {
-        window.onFirebaseStatusChange(isFirebaseConnected, isFirebaseConnected ? "Connected" : "Disconnected");
-      }
-    });
+      // Monitor Firebase connection state (.info/connected)
+      const connectedRef = firebaseDb.ref(".info/connected");
+      connectedRef.on("value", (snap) => {
+        isFirebaseConnected = snap.val() === true;
+        console.log("[Firebase] Realtime connection state:", isFirebaseConnected ? "CONNECTED" : "CONNECTING...");
+        if (window.onFirebaseStatusChange) {
+          window.onFirebaseStatusChange(isFirebaseConnected, isFirebaseConnected ? "Connected" : "Reconnecting...");
+        }
+      });
+    }
 
     return true;
   } catch (error) {
-    console.error("[Firebase] Initialization failed:", error);
+    console.error("[Firebase] Initialization error:", error);
     isFirebaseInitialized = false;
     isFirebaseConnected = false;
     if (window.onFirebaseStatusChange) {
@@ -176,7 +204,7 @@ function saveFirebaseConfig(newConfig) {
 }
 
 /**
- * Helper to write a test reading to Firebase (if authenticated/allowed by rules)
+ * Helper to write a test reading to Firebase
  */
 function pushTestReading(testData) {
   if (!isFirebaseInitialized || !firebaseDb) {
@@ -188,12 +216,19 @@ function pushTestReading(testData) {
     timestamp: timestamp
   };
 
-  // Update realtime node
   const updates = {};
   updates["powerMonitoring/realtime"] = data;
-  updates[`powerMonitoring/history/${timestamp}`] = data;
-  updates["powerMonitoring/system/lastUpdated"] = new Date().toISOString();
-  updates["powerMonitoring/system/online"] = true;
+  updates["IndustrialMachine/voltage"] = data.voltage;
+  updates["IndustrialMachine/current"] = data.current;
+  updates["IndustrialMachine/power"] = data.realPower;
+  updates["IndustrialMachine/apparentPower"] = data.apparentPower;
+  updates["IndustrialMachine/powerFactor"] = data.powerFactor;
+  updates["IndustrialMachine/normalPF"] = data.normalPF;
+  updates["IndustrialMachine/pfLowLimit"] = data.pfLowLimit;
+  updates["IndustrialMachine/pfHighLimit"] = data.pfHighLimit;
+  updates["IndustrialMachine/connection"] = "ONLINE";
+  updates["IndustrialMachine/machineStatus"] = "NORMAL";
+  updates["IndustrialMachine/relayStatus"] = "ON";
 
   return firebaseDb.ref().update(updates);
 }
@@ -206,6 +241,8 @@ window.FirebaseClient = {
   init: initFirebase,
   saveConfig: saveFirebaseConfig,
   subscribe: subscribeToPath,
+  fetchNode,
+  putNode,
   detachAll: detachAllListeners,
   pushTestReading,
   get isInitialized() { return isFirebaseInitialized; },

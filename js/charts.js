@@ -44,7 +44,7 @@
       responsive: true,
       maintainAspectRatio: false,
       animation: {
-        duration: 300,
+        duration: 250,
         easing: "easeOutQuart"
       },
       interaction: {
@@ -211,7 +211,7 @@
     if (ctxPF) {
       const pfOpts = getBaseChartOptions(colors, "");
       pfOpts.scales.y.suggestedMin = 0.0;
-      pfOpts.scales.y.suggestedMax = 0.25;
+      pfOpts.scales.y.suggestedMax = 0.35;
       charts.powerFactor = new Chart(ctxPF.getContext("2d"), {
         type: "line",
         data: {
@@ -254,7 +254,7 @@
         options: {
           responsive: true,
           maintainAspectRatio: false,
-          animation: { duration: 300 },
+          animation: { duration: 250 },
           plugins: {
             legend: { display: false },
             tooltip: {
@@ -288,8 +288,7 @@
     const timestamp = data.timestamp ? new Date(data.timestamp).getTime() : Date.now();
     const timeLabel = new Date(timestamp).toLocaleTimeString("en-US", { hour12: false });
 
-    // Store in history array
-    telemetryHistory.push({
+    const newPoint = {
       timestamp,
       label: timeLabel,
       voltage: typeof data.voltage === "number" ? data.voltage : parseFloat(data.voltage) || null,
@@ -297,7 +296,14 @@
       realPower: typeof data.realPower === "number" ? data.realPower : parseFloat(data.realPower) || null,
       apparentPower: typeof data.apparentPower === "number" ? data.apparentPower : parseFloat(data.apparentPower) || null,
       powerFactor: typeof data.powerFactor === "number" ? data.powerFactor : parseFloat(data.powerFactor) || null
-    });
+    };
+
+    // If new point arrived within 800ms of last point, update in-place to avoid jitter
+    if (telemetryHistory.length > 0 && Math.abs(telemetryHistory[telemetryHistory.length - 1].timestamp - timestamp) < 800) {
+      telemetryHistory[telemetryHistory.length - 1] = newPoint;
+    } else {
+      telemetryHistory.push(newPoint);
+    }
 
     // Keep history capped (last 2 hours max to prevent memory bloat)
     const twoHoursAgo = Date.now() - 2 * 60 * 60 * 1000;
@@ -319,7 +325,6 @@
   function ingestHistoricalData(historyObject) {
     if (!historyObject || typeof historyObject !== "object") return;
     
-    // Convert object or list to sorted array
     const entries = Object.values(historyObject);
     entries.forEach((item) => {
       if (item) {
@@ -336,7 +341,6 @@
       }
     });
 
-    // Sort by timestamp
     telemetryHistory.sort((a, b) => a.timestamp - b.timestamp);
     renderChartsForTimeRange();
   }
@@ -406,7 +410,6 @@
     });
   }
 
-  // Listen for theme toggle events
   window.addEventListener("themeChanged", updateTheme);
 
   window.ChartManager = {
